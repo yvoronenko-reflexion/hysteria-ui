@@ -92,6 +92,29 @@ cd src-tauri && cargo test     # URI parse/build + YAML generation unit tests
   > A fully prompt-free, signed `launchd` privileged helper (via `SMAppService`) is the alternative
   > production approach; it requires Developer ID signing + notarization.
 
+## Releasing
+
+Releases are built by `.github/workflows/release.yml` when you push a `v*` tag:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The workflow derives the version from the tag (patching `package.json`, `tauri.conf.json` and
+`Cargo.toml`, so you don't have to bump them by hand), downloads the matching `hysteria` binary
+for each architecture, runs `cargo test`, and builds a `.dmg` for both Apple Silicon
+(`aarch64-apple-darwin`) and Intel (`x86_64-apple-darwin`).
+
+The result is a **draft** release — review the generated notes and publish it from the GitHub
+Releases page. To pin the bundled hysteria version instead of tracking latest, set
+`HYSTERIA_RELEASE` in the workflow to a hysteria tag (e.g. `app/v2.10.0`).
+
+The builds are **unsigned**: users will get a Gatekeeper warning on first launch. To sign and
+notarize, add the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+`APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID` secrets and pass them through to the
+`tauri-action` step ([docs](https://tauri.app/distribute/sign/macos/)).
+
 ## URI format
 
 ```
