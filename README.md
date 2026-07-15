@@ -78,21 +78,62 @@ cd src-tauri && cargo test     # URI parse/build + YAML generation unit tests
 - **Proxy** (default, no privileges): runs `hysteria client -c <config>` as a normal child process
   and exposes the SOCKS5/HTTP listeners you configured. Use it with, e.g.,
   `curl --socks5 127.0.0.1:1080 https://ifconfig.me`.
-- **TUN** (system-wide, requires admin): the tunnel device needs root. On macOS the interface name
-  must be `utun<N>` (assigned automatically) and the server's own IP is excluded from the tunnel so
-  the proxy connection isn't routed back into itself.
+- **TUN** (system-wide, requires admin): traffic from *every* app on the machine is routed through
+  the tunnel, with no per-app proxy configuration. This needs root — see below.
 
-  By default the client is launched via `osascript ... with administrator privileges`, which prompts
-  for your password on **every** connect and disconnect.
+## Why TUN mode needs root
 
-  **Grant privileges once:** in TUN mode the app shows a **"Set up passwordless access"** button. It
-  installs a one-time rule under `/etc/sudoers.d/hysteria-ui` (single admin prompt) that lets *only*
-  the bundled hysteria binary + this app's config path run as root without a password. After that,
-  connect/disconnect never prompt. Click **Revoke** to remove the rule. The rule is pinned to the
-  current binary path, so if you move the app, re-run the setup.
+Proxy mode never asks for privileges: it just opens a listening socket on a high port in your own
+user account, and it's up to each app to opt in by pointing at `127.0.0.1:1080`.
 
-  > A fully prompt-free, signed `launchd` privileged helper (via `SMAppService`) is the alternative
-  > production approach; it requires Developer ID signing + notarization.
+TUN mode is system-wide instead of opt-in, and both halves of that require root:
+
+1. **Creating the virtual network interface.** The tunnel is a `utun` device — a kernel network
+   interface that hands packets to a userspace process. On macOS, opening the `utun` kernel control
+   socket is a privileged operation, so the process that creates the interface must be root.
+2. **Changing the system routing table.** An interface that receives no packets is useless, so
+   hysteria installs routes that send the machine's traffic into the tunnel. Editing the kernel
+   routing table is likewise root-only.
+
+So the privilege isn't for the GUI, or for reading your files, or for anything persistent — it is
+what the macOS kernel demands from any process that wants to create a network interface and route
+the system's traffic into it. Every VPN client on macOS pays this cost in some form.
+
+**What actually runs as root.** Only the bundled `hysteria` binary. The Tauri app itself always runs
+as you; it shells out to launch the client elevated and talks to it over pipes. Two implementation
+details follow from doing this on macOS: the interface name must be `utun<N>` (the app assigns the
+lowest free index automatically), and the server's own IP is added to `excludeRoutes` at connect
+time — otherwise the tunnel would capture the proxy's own connection to the server and deadlock.
+
+### Getting the password prompt out of the way
+
+By default the client is launched via `osascript ... with administrator privileges`, which prompts
+for your password on **every** connect *and* disconnect (stopping a root process also needs root).
+
+**Grant privileges once:** in TUN mode the app shows a **"Set up passwordless access"** button. It
+installs a rule under `/etc/sudoers.d/hysteria-ui` (one admin prompt, validated with `visudo` before
+and after install) that lets *only* these two exact commands run as root without a password:
+
+```
+<you> ALL=(root) NOPASSWD: <app>/binaries/hysteria client -c <app-cache>/active-config.yaml
+<you> ALL=(root) NOPASSWD: /usr/bin/pkill -f <app-cache>/active-config.yaml
+```
+
+That is, the bundled binary with *that* config path, and the `pkill` that stops it. It is not a
+blanket `NOPASSWD: ALL`, and it grants nothing to any other binary. After that, connect/disconnect
+never prompt. Click **Revoke** to remove the rule (`rm /etc/sudoers.d/hysteria-ui`).
+
+Two caveats worth knowing before you install it:
+
+- The rule is **pinned to the current binary path**, so if you move or reinstall the app, the rule
+  stops matching and you re-run the setup.
+- The config path it names is writable by your user, so anything that can write that file can
+  influence what the elevated hysteria process is configured to do. That's the trade you're making
+  for skipping the prompt; if you'd rather not, just leave the rule uninstalled and keep typing your
+  password.
+
+> A fully prompt-free, signed `launchd` privileged helper (via `SMAppService`) is the alternative
+> production approach; it requires Developer ID signing + notarization.
 
 ## Releasing
 
