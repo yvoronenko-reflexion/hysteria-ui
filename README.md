@@ -3,6 +3,8 @@
 A desktop GUI client for the [Hysteria2](https://v2.hysteria.network/) proxy, built with
 [Tauri](https://tauri.app/) (Rust core + React/TypeScript UI).
 
+![Connected in TUN mode: profile sidebar, connection bar with live traffic rates, and logs](docs/screenshot.png)
+
 It lets you:
 
 - **Create and edit** Hysteria2 client configurations through a structured form (with a raw-YAML
