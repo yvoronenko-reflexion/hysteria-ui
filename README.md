@@ -45,12 +45,13 @@ never re-implements that logic — it calls the commands.
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://rustup.rs/) (stable)
 - The `hysteria` binary at `src-tauri/binaries/hysteria`. Download the client for your platform
-  from the [releases page](https://github.com/apernet/hysteria/releases/latest):
+  from the [releases page](https://github.com/apernet/hysteria/releases) (the app is tested against
+  v2.13.0):
 
   ```sh
   # macOS Apple Silicon example
   curl -fL -o src-tauri/binaries/hysteria \
-    https://github.com/apernet/hysteria/releases/latest/download/hysteria-darwin-arm64
+    https://github.com/apernet/hysteria/releases/download/app/v2.13.0/hysteria-darwin-arm64
   chmod +x src-tauri/binaries/hysteria
   ```
 
@@ -150,8 +151,8 @@ for each architecture, runs `cargo test`, and builds a `.dmg` for both Apple Sil
 (`aarch64-apple-darwin`) and Intel (`x86_64-apple-darwin`).
 
 The result is a **draft** release — review the generated notes and publish it from the GitHub
-Releases page. To pin the bundled hysteria version instead of tracking latest, set
-`HYSTERIA_RELEASE` in the workflow to a hysteria tag (e.g. `app/v2.10.0`).
+Releases page. The bundled hysteria version is pinned by `HYSTERIA_RELEASE` in the workflow
+(currently `app/v2.13.0`); set it to `latest` to track upstream instead.
 
 The builds are **unsigned**: users will get a Gatekeeper warning on first launch. To sign and
 notarize, add the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,

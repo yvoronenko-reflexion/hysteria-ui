@@ -11,7 +11,7 @@ permissions:
 
 env:
   # Pin to a hysteria tag (e.g. "app/v2.6.2") for reproducible builds, or "latest".
-  HYSTERIA_RELEASE: latest
+  HYSTERIA_RELEASE: app/v2.13.0
 
 jobs:
   create-release:
@@ -45,7 +45,8 @@ jobs:
           - runner: macos-14
             target: aarch64-apple-darwin
             hysteria_asset: hysteria-darwin-arm64
-          - runner: macos-13
+          # GitHub retired the macos-13 Intel runners; cross-compile x86_64 on arm64.
+          - runner: macos-14
             target: x86_64-apple-darwin
             hysteria_asset: hysteria-darwin-amd64
     runs-on: ${{ matrix.runner }}
