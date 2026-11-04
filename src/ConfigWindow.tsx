@@ -1,9 +1,59 @@
 import { useEffect, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import * as api from "./lib/api";
 import type { HysteriaConfig } from "./types";
 import { ServerConfigForm, ClientConfigForm } from "./components/ConfigForm";
 import "./App.css";
+
+/** Passwordless-TUN management lives with the other client-side settings; the
+ * main window only surfaces a setup hint while the rule is missing. */
+function PrivilegesSection() {
+  const [installed, setInstalled] = useState<boolean | null>(null);
+  useEffect(() => {
+    api.privilegeStatus().then(setInstalled).catch(() => {});
+  }, []);
+  if (installed === null) return null;
+
+  async function setup() {
+    try {
+      await api.installPrivileges();
+      setInstalled(true);
+    } catch {
+      // Authorization cancelled — nothing changed.
+    }
+  }
+  async function revoke() {
+    try {
+      await api.uninstallPrivileges();
+      setInstalled(false);
+    } catch {
+      // Authorization cancelled — nothing changed.
+    }
+  }
+
+  return (
+    <section className="section" style={{ marginTop: 12 }}>
+      <h3 className="section-title">Passwordless TUN</h3>
+      <div className="priv-row">
+        <span>
+          {installed
+            ? "Enabled — connecting in tunnel mode won't prompt for your password."
+            : "Not set up — tunnel mode prompts for your password on each connect."}
+        </span>
+        {installed ? (
+          <button className="btn-danger" onClick={revoke}>
+            Revoke
+          </button>
+        ) : (
+          <button className="btn-ghost" onClick={setup}>
+            Set up…
+          </button>
+        )}
+      </div>
+    </section>
+  );
+}
 
 interface ConfigInit {
   config: HysteriaConfig;
@@ -64,7 +114,10 @@ export default function ConfigWindow({ kind }: { kind: "server" | "client" }) {
         {kind === "server" ? (
           <ServerConfigForm config={config} onChange={change} />
         ) : (
-          <ClientConfigForm config={config} mode={mode} onChange={change} />
+          <>
+            <ClientConfigForm config={config} mode={mode} onChange={change} />
+            {mode === "tun" && <PrivilegesSection />}
+          </>
         )}
       </div>
       <div className="modal-actions">

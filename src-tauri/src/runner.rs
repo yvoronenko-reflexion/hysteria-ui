@@ -43,6 +43,9 @@ pub struct StatusPayload {
     /// times the QUIC connection has been (re)established. 2+ means the
     /// connection dropped and was rebuilt at least once.
     pub connect_count: Option<u64>,
+    /// Epoch millis of when the session first reached "connected" (kept across
+    /// silent redials so the UI shows session uptime, not last-dial uptime).
+    pub connected_at: Option<u64>,
 }
 
 impl StatusPayload {
@@ -54,6 +57,7 @@ impl StatusPayload {
             profile_id: None,
             profile_name: None,
             connect_count: None,
+            connected_at: None,
         }
     }
 
@@ -108,6 +112,9 @@ pub struct RunnerState {
     /// Last FATAL-ish line seen; used as the error message when the process
     /// dies before the connection was established.
     last_error: Mutex<Option<String>>,
+    /// Most recent (profile, mode) handed to `connect`, post-`apply_mode`.
+    /// Lets the tray reconnect and the IP lookup find the proxy listener.
+    last_conn: Mutex<Option<(Profile, String)>>,
 }
 
 impl Default for RunnerState {
@@ -118,13 +125,22 @@ impl Default for RunnerState {
             stop: Mutex::new(None),
             traffic_stop: Mutex::new(None),
             last_error: Mutex::new(None),
+            last_conn: Mutex::new(None),
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn set_status(app: &AppHandle, payload: StatusPayload) {
     let state = app.state::<RunnerState>();
     *state.status.lock().unwrap() = payload.clone();
+    crate::tray::update(app, &payload);
     let _ = app.emit(STATUS_EVENT, payload);
 }
 
@@ -193,6 +209,7 @@ fn process_child_line(app: &AppHandle, raw: &str) {
                 cur.state = "connected".into();
                 cur.message = None;
                 cur.connect_count = parse_connect_count(&line).or(cur.connect_count);
+                cur.connected_at = cur.connected_at.or_else(|| Some(now_ms()));
                 set_status(app, cur);
             }
         }
@@ -301,6 +318,40 @@ fn hysteria_path(app: &AppHandle) -> Result<PathBuf, String> {
     Err("hysteria binary not found. Expected it at src-tauri/binaries/hysteria.".to_string())
 }
 
+/// Which hysteria binary the app runs, reported to the UI.
+#[derive(Clone, serde::Serialize)]
+pub struct VersionInfo {
+    pub version: String,
+    pub path: String,
+}
+
+/// `hysteria version` for the binary this app would launch. Cheap enough to run
+/// on demand — the UI asks once at startup.
+pub fn hysteria_version(app: &AppHandle) -> Result<VersionInfo, String> {
+    let bin = hysteria_path(app)?;
+    let out = Command::new(&bin)
+        .arg("version")
+        .output()
+        .map_err(|e| format!("Failed to run hysteria: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let version = parse_version(&text)
+        .ok_or_else(|| "Could not read a version from `hysteria version`.".to_string())?;
+    Ok(VersionInfo {
+        version,
+        path: bin.to_string_lossy().to_string(),
+    })
+}
+
+/// Pull the version out of `hysteria version` output. The command prints an
+/// ASCII-art banner first, then `Key:\tValue` lines — only `Version:` matters.
+fn parse_version(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("Version:"))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
 /// Runtime dir for the active config + tun logs. Uses the cache dir because its
 /// path has no spaces (unlike "Application Support"), which matters for the
 /// sudoers command matching.
@@ -373,6 +424,7 @@ pub fn connect(app: &AppHandle, mut profile: Profile, mode: &str) -> Result<(), 
     {
         let state = app.state::<RunnerState>();
         *state.last_error.lock().unwrap() = None;
+        *state.last_conn.lock().unwrap() = Some((profile.clone(), mode.to_string()));
     }
     set_status(
         app,
@@ -383,6 +435,7 @@ pub fn connect(app: &AppHandle, mut profile: Profile, mode: &str) -> Result<(), 
             profile_id: Some(profile.id.clone()),
             profile_name: Some(profile.name.clone()),
             connect_count: None,
+            connected_at: None,
         },
     );
     emit_log(app, &format!("Starting hysteria ({mode} mode)…"));
@@ -411,6 +464,7 @@ pub fn connect(app: &AppHandle, mut profile: Profile, mode: &str) -> Result<(), 
                         profile_id: Some(profile.id.clone()),
                         profile_name: Some(profile.name.clone()),
                         connect_count: None,
+                        connected_at: Some(now_ms()),
                     },
                 );
             }
@@ -659,6 +713,75 @@ pub fn current_status(app: &AppHandle) -> StatusPayload {
     let state = app.state::<RunnerState>();
     let status = state.status.lock().unwrap().clone();
     status
+}
+
+/// The last (profile, mode) passed to `connect`, for tray reconnects.
+pub fn last_connection(app: &AppHandle) -> Option<(Profile, String)> {
+    let state = app.state::<RunnerState>();
+    let last = state.last_conn.lock().unwrap().clone();
+    last
+}
+
+// --- External IP -----------------------------------------------------------
+
+/// Externally visible IP via curl. In proxy mode the request must go through
+/// the local listener (nothing routes app traffic automatically); in TUN mode
+/// — or disconnected — a direct request already uses the system routes.
+pub fn external_ip(app: &AppHandle) -> Result<String, String> {
+    let state = app.state::<RunnerState>();
+    let status = state.status.lock().unwrap().clone();
+    let proxy = if status.state == "connected" && status.mode.as_deref() == Some("proxy") {
+        let last = state.last_conn.lock().unwrap();
+        last.as_ref().and_then(|(p, _)| proxy_url(&p.config))
+    } else {
+        None
+    };
+
+    let mut cmd = Command::new("curl");
+    cmd.args(["-fsS", "--max-time", "5"]);
+    if let Some(proxy) = proxy {
+        cmd.arg("--proxy").arg(proxy);
+    }
+    cmd.arg("https://api.ipify.org");
+    let out = cmd.output().map_err(|e| format!("Failed to run curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "IP lookup failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if ip.is_empty() {
+        return Err("IP lookup returned an empty response".to_string());
+    }
+    Ok(ip)
+}
+
+/// `curl --proxy` URL for whichever local listener the config enables.
+/// `socks5h` (not `socks5`) so DNS resolves remotely too.
+fn proxy_url(cfg: &HysteriaConfig) -> Option<String> {
+    fn auth(user: &str, pass: &str) -> String {
+        if user.is_empty() {
+            String::new()
+        } else {
+            format!("{user}:{pass}@")
+        }
+    }
+    if cfg.socks5.enabled && !cfg.socks5.listen.is_empty() {
+        Some(format!(
+            "socks5h://{}{}",
+            auth(&cfg.socks5.username, &cfg.socks5.password),
+            cfg.socks5.listen
+        ))
+    } else if cfg.http.enabled && !cfg.http.listen.is_empty() {
+        Some(format!(
+            "http://{}{}",
+            auth(&cfg.http.username, &cfg.http.password),
+            cfg.http.listen
+        ))
+    } else {
+        None
+    }
 }
 
 // --- Traffic monitor -----------------------------------------------------------
@@ -985,7 +1108,7 @@ fn escape_applescript(s: &str) -> String {
 mod tests {
     use super::{
         apply_mode, classify_line, error_message, parse_connect_count, parse_netstat_interface,
-        parse_nettop_process, strip_ansi, LineEvent,
+        parse_nettop_process, parse_version, proxy_url, strip_ansi, LineEvent,
     };
     use crate::config::generate_yaml;
     use crate::model::HysteriaConfig;
@@ -1034,6 +1157,20 @@ mod tests {
         c.tun.enabled = true;
         apply_mode(&mut c, "proxy").unwrap();
         assert!(!generate_yaml(&c).unwrap().contains("tun:"));
+    }
+
+    #[test]
+    fn reads_the_version_past_the_banner() {
+        let out = concat!(
+            "\u{2591}\u{2588} banner \u{2588}\u{2591}\n\n",
+            "a powerful, lightning fast and censorship resistant proxy\n\n",
+            "Version:\tv2.12.2\n",
+            "BuildDate:\t2026-08-23T00:39:00Z\n",
+            "Platform:\tdarwin\n",
+        );
+        assert_eq!(parse_version(out).as_deref(), Some("v2.12.2"));
+        assert_eq!(parse_version("no version here\n"), None);
+        assert_eq!(parse_version("Version:\t\n"), None);
     }
 
     #[test]
@@ -1110,6 +1247,25 @@ hysteria.4242                                                         1043938   
 ";
         assert_eq!(parse_nettop_process(text, 4242), Some((1043938, 5150)));
         assert_eq!(parse_nettop_process(text, 9999), None);
+    }
+
+    #[test]
+    fn proxy_url_prefers_socks5_and_carries_auth() {
+        let mut c = cfg();
+        apply_mode(&mut c, "proxy").unwrap(); // enables the default SOCKS5 listener
+        assert_eq!(proxy_url(&c), Some("socks5h://127.0.0.1:1080".to_string()));
+
+        c.socks5.username = "u".into();
+        c.socks5.password = "p".into();
+        assert_eq!(proxy_url(&c), Some("socks5h://u:p@127.0.0.1:1080".to_string()));
+
+        c.socks5.enabled = false;
+        c.http.enabled = true;
+        c.http.listen = "127.0.0.1:8080".into();
+        assert_eq!(proxy_url(&c), Some("http://127.0.0.1:8080".to_string()));
+
+        c.http.enabled = false;
+        assert_eq!(proxy_url(&c), None);
     }
 
     #[test]

@@ -1,4 +1,5 @@
-import type { Profile, StatusPayload } from "../types";
+import type { Profile, StatusPayload, VersionInfo } from "../types";
+import { ImportIcon, PlusIcon } from "./icons";
 
 export function Sidebar({
   profiles,
@@ -7,6 +8,7 @@ export function Sidebar({
   onSelect,
   onNew,
   onImport,
+  version,
 }: {
   profiles: Profile[];
   selectedId: string | null;
@@ -14,6 +16,7 @@ export function Sidebar({
   onSelect: (id: string) => void;
   onNew: () => void;
   onImport: () => void;
+  version: VersionInfo | null;
 }) {
   const activeId =
     status.state === "connected" || status.state === "connecting" ? status.profileId : null;
@@ -22,13 +25,11 @@ export function Sidebar({
     <aside className="sidebar">
       <div className="sidebar-header">
         <span className="app-title">Hysteria</span>
-      </div>
-      <div className="sidebar-actions">
-        <button className="btn-ghost" onClick={onNew}>
-          + New
+        <button className="icon-btn" title="New profile" onClick={onNew}>
+          <PlusIcon />
         </button>
-        <button className="btn-ghost" onClick={onImport}>
-          Import URI
+        <button className="icon-btn" title="Import hysteria2:// URI" onClick={onImport}>
+          <ImportIcon />
         </button>
       </div>
       <div className="profile-list">
@@ -52,6 +53,11 @@ export function Sidebar({
           </button>
         ))}
       </div>
+      {version && (
+        <div className="sidebar-footer" title={version.path}>
+          hysteria {version.version}
+        </div>
+      )}
     </aside>
   );
 }

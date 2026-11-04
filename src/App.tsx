@@ -3,11 +3,12 @@ import { emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "./lib/api";
-import type { HysteriaConfig, Profile, StatusPayload, TrafficPayload } from "./types";
+import type { HysteriaConfig, Profile, StatusPayload, TrafficPayload, VersionInfo } from "./types";
 import { newProfile } from "./types";
 import { Sidebar } from "./components/Sidebar";
-import { ConnectionBar } from "./components/ConnectionBar";
+import { ActiveConnectionStrip, ConnectionBar } from "./components/ConnectionBar";
 import { LogView } from "./components/LogView";
+import { CodeIcon, ImportIcon, PlusIcon, ShareIcon, SlidersIcon, TrashIcon } from "./components/icons";
 import "./App.css";
 
 const MAX_LOGS = 500;
@@ -38,10 +39,16 @@ export default function App() {
     profileId: null,
     profileName: null,
     connectCount: null,
+    connectedAt: null,
   });
   const [traffic, setTraffic] = useState<TrafficPayload | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
-  const [showLogs, setShowLogs] = useState(() => localStorage.getItem(SHOW_LOGS_KEY) === "1");
+  // Logs are the main content area; open unless explicitly collapsed.
+  const [showLogs, setShowLogs] = useState(() => localStorage.getItem(SHOW_LOGS_KEY) !== "0");
+  const [ip, setIp] = useState<string | null>(null);
+  const [ipLoading, setIpLoading] = useState(false);
+  // Guards against out-of-order IP responses (each refresh invalidates older ones).
+  const ipSeq = useRef(0);
   const [toast, setToast] = useState<string | null>(null);
   const [modal, setModal] = useState<{
     title: string;
@@ -50,6 +57,7 @@ export default function App() {
   } | null>(null);
   const [importText, setImportText] = useState("");
   const [privInstalled, setPrivInstalled] = useState(false);
+  const [version, setVersion] = useState<VersionInfo | null>(null);
   const toastTimer = useRef<number | null>(null);
   // Latest draft/mode for the config-window event handlers (registered once).
   const draftRef = useRef(draft);
@@ -66,6 +74,7 @@ export default function App() {
     api.listProfiles().then(setProfiles).catch(showError);
     api.connectionStatus().then(setStatus).catch(() => {});
     api.privilegeStatus().then(setPrivInstalled).catch(() => {});
+    api.hysteriaVersion().then(setVersion).catch(() => {});
 
     const unStatus = listen<StatusPayload>("connection-status", (e) => setStatus(e.payload));
     const unTraffic = listen<TrafficPayload>("traffic-stats", (e) => setTraffic(e.payload));
@@ -119,6 +128,52 @@ export default function App() {
   useEffect(() => {
     if (status.state !== "connected") setTraffic(null);
   }, [status.state]);
+
+  function refreshIp(delayMs = 0) {
+    const seq = ++ipSeq.current;
+    setIpLoading(true);
+    window.setTimeout(() => {
+      if (seq !== ipSeq.current) return;
+      api
+        .externalIp()
+        .then((v) => {
+          if (seq !== ipSeq.current) return;
+          setIp(v);
+          setIpLoading(false);
+        })
+        .catch(() => {
+          if (seq !== ipSeq.current) return;
+          setIp(null);
+          setIpLoading(false);
+        });
+    }, delayMs);
+  }
+
+  // Re-check the external IP whenever routing changes. The post-connect delay
+  // gives the tunnel/listener a moment to actually carry traffic.
+  useEffect(() => {
+    if (status.state === "connected") refreshIp(1500);
+    else if (status.state === "connecting") setIp(null);
+    else refreshIp(300);
+  }, [status.state]);
+
+  // The settings windows can change the passwordless rule; re-check when the
+  // main window regains focus.
+  useEffect(() => {
+    const onFocus = () => api.privilegeStatus().then(setPrivInstalled).catch(() => {});
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Escape dismisses whatever modal is up.
+  useEffect(() => {
+    if (!modal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setModal(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [modal]);
 
   function toggleLogs() {
     setShowLogs((v) => {
@@ -278,6 +333,10 @@ export default function App() {
     if (!draft) return;
     setLogs([]);
     try {
+      // Connecting while another profile holds the connection replaces it
+      // (the strip's Connect is labeled accordingly).
+      const active = status.state === "connected" || status.state === "connecting";
+      if (active && status.profileId !== draft.id) await api.disconnect();
       // The backend derives tun.enabled (and a fallback proxy listener) from `mode`.
       await api.connect(draft, mode);
     } catch (e) {
@@ -303,15 +362,11 @@ export default function App() {
     }
   }
 
-  async function revokePrivileges() {
-    try {
-      await api.uninstallPrivileges();
-      setPrivInstalled(false);
-      showToast("Passwordless access revoked");
-    } catch (e) {
-      showError(e);
-    }
-  }
+  // The live connection belongs to a different profile than the one on screen
+  // (or none is selected): pin it above everything so its Disconnect and
+  // traffic never leave view.
+  const connActive = status.state === "connected" || status.state === "connecting";
+  const pinned = connActive && status.profileId != null && status.profileId !== draft?.id;
 
   return (
     <div className="app">
@@ -322,9 +377,22 @@ export default function App() {
         onSelect={selectProfile}
         onNew={createProfile}
         onImport={() => setModal({ title: "Import hysteria2:// URI", body: "", kind: "import" })}
+        version={version}
       />
 
       <main className="main">
+        {pinned && (
+          <ActiveConnectionStrip
+            status={status}
+            traffic={traffic}
+            ip={ip}
+            ipLoading={ipLoading}
+            onRefreshIp={() => refreshIp()}
+            onDisconnect={disconnect}
+            onShow={() => status.profileId && selectProfile(status.profileId)}
+          />
+        )}
+
         {draft ? (
           <>
             <div className="editor-header">
@@ -334,40 +402,44 @@ export default function App() {
                 onChange={(e) => renameProfile(e.target.value)}
                 placeholder="Profile name"
               />
-              <div className="editor-actions">
-                <button
-                  className="btn-ghost"
-                  title="Server settings (address, TLS, obfuscation)"
-                  onClick={() => openConfigWindow("server")}
-                >
-                  ⚙ Server
-                </button>
-                <button
-                  className="btn-ghost"
-                  title="Client settings (listeners, tunnel, bandwidth)"
-                  onClick={() => openConfigWindow("client")}
-                >
-                  ⚙ Client
-                </button>
-                <button className="btn-ghost" onClick={showYaml}>
-                  View YAML
-                </button>
-                <button className="btn-ghost" onClick={exportUri}>
-                  Export URI
-                </button>
-                <button
-                  className="btn-ghost btn-del"
-                  onClick={() =>
-                    setModal({
-                      title: "Delete profile?",
-                      body: `“${draft.name || "(unnamed)"}” will be permanently removed.`,
-                      kind: "confirm",
-                    })
-                  }
-                >
-                  Delete
-                </button>
-              </div>
+              <button
+                className="btn-ghost"
+                title="Server settings (address, TLS, obfuscation)"
+                onClick={() => openConfigWindow("server")}
+              >
+                <SlidersIcon /> Server
+              </button>
+              <button
+                className="btn-ghost"
+                title="Client settings (listeners, tunnel, bandwidth)"
+                onClick={() => openConfigWindow("client")}
+              >
+                <SlidersIcon /> Client
+              </button>
+              <span className="header-divider" />
+              <button className="btn-ghost btn-icon" title="View generated YAML" onClick={showYaml}>
+                <CodeIcon />
+              </button>
+              <button
+                className="btn-ghost btn-icon"
+                title="Export share URI (copies to clipboard)"
+                onClick={exportUri}
+              >
+                <ShareIcon />
+              </button>
+              <button
+                className="btn-ghost btn-icon btn-del"
+                title="Delete profile"
+                onClick={() =>
+                  setModal({
+                    title: "Delete profile?",
+                    body: `“${draft.name || "(unnamed)"}” will be permanently removed.`,
+                    kind: "confirm",
+                  })
+                }
+              >
+                <TrashIcon />
+              </button>
             </div>
 
             <ConnectionBar
@@ -378,36 +450,26 @@ export default function App() {
               onConnect={connect}
               onDisconnect={disconnect}
               disabled={!draft.config.server}
+              ip={ip}
+              ipLoading={ipLoading}
+              onRefreshIp={() => refreshIp()}
+              activeElsewhere={pinned ? status.profileName ?? "(unnamed)" : null}
             />
 
-            {mode === "tun" && (
-              <div className={`priv-banner ${privInstalled ? "ok" : ""}`}>
-                {privInstalled ? (
-                  <>
-                    <span>✓ Passwordless TUN is set up — no password prompt on connect.</span>
-                    <button className="btn-ghost" onClick={revokePrivileges}>
-                      Revoke
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <span>
-                      TUN needs admin rights and will prompt for your password on every connect
-                      and disconnect.
-                    </span>
-                    <button className="btn-primary" onClick={setupPrivileges}>
-                      Set up passwordless access
-                    </button>
-                  </>
-                )}
+            {mode === "tun" && !privInstalled && (pinned || !connActive) && (
+              <div className="info-line">
+                <span>TUN will ask for your password on each connect and disconnect.</span>
+                <button className="link-btn" onClick={setupPrivileges}>
+                  Set up passwordless →
+                </button>
               </div>
             )}
 
             {!draft.config.server && (
-              <div className="priv-banner">
+              <div className="info-line">
                 <span>No server configured yet — set the address and credentials first.</span>
-                <button className="btn-primary" onClick={() => openConfigWindow("server")}>
-                  ⚙ Server settings
+                <button className="link-btn" onClick={() => openConfigWindow("server")}>
+                  Server settings →
                 </button>
               </div>
             )}
@@ -422,13 +484,13 @@ export default function App() {
             <p>Create a new profile or import a hysteria2:// URI to get started.</p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={createProfile}>
-                + New Profile
+                <PlusIcon /> New Profile
               </button>
               <button
                 className="btn-ghost"
                 onClick={() => setModal({ title: "Import hysteria2:// URI", body: "", kind: "import" })}
               >
-                Import URI
+                <ImportIcon /> Import URI
               </button>
             </div>
           </div>

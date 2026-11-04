@@ -2,12 +2,11 @@ mod config;
 mod model;
 mod runner;
 mod store;
+mod tray;
 mod uri;
 
 use model::{HysteriaConfig, Profile};
 use runner::{RunnerState, StatusPayload};
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
 // --- config / URI commands ---
@@ -68,6 +67,19 @@ fn connection_status(app: AppHandle) -> StatusPayload {
     runner::current_status(&app)
 }
 
+/// Version + path of the hysteria binary the app runs.
+#[tauri::command]
+async fn hysteria_version(app: AppHandle) -> Result<runner::VersionInfo, String> {
+    runner::hysteria_version(&app)
+}
+
+/// Externally visible IP. Async so the up-to-5s curl doesn't block the main
+/// thread (Tauri runs async commands on a worker pool).
+#[tauri::command]
+async fn external_ip(app: AppHandle) -> Result<String, String> {
+    runner::external_ip(&app)
+}
+
 // --- privileged helper (passwordless TUN) ---
 
 #[tauri::command]
@@ -87,7 +99,7 @@ fn uninstall_privileges() -> Result<(), String> {
 
 /// Bring the main window back after it was hidden into the tray. On macOS this
 /// also restores the Dock icon (see the CloseRequested handler below).
-fn show_main_window(app: &AppHandle) {
+pub(crate) fn show_main_window(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(w) = app.get_webview_window("main") {
@@ -103,22 +115,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(RunnerState::default())
         .setup(|app| {
-            let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            let mut builder = TrayIconBuilder::new()
-                .menu(&menu)
-                .show_menu_on_left_click(true)
-                .tooltip("Hysteria Client")
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show_main_window(app),
-                    "quit" => app.exit(0),
-                    _ => {}
-                });
-            if let Some(icon) = app.default_window_icon() {
-                builder = builder.icon(icon.clone());
-            }
-            builder.build(app)?;
+            tray::init(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -156,6 +153,8 @@ pub fn run() {
             connect,
             disconnect,
             connection_status,
+            hysteria_version,
+            external_ip,
             privilege_status,
             install_privileges,
             uninstall_privileges

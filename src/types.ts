@@ -72,6 +72,14 @@ export interface StatusPayload {
   profileName: string | null;
   /** Times the QUIC connection has been (re)established; 2+ means it dropped and recovered. */
   connectCount: number | null;
+  /** Epoch millis of when the session first connected (survives silent redials). */
+  connectedAt: number | null;
+}
+
+/** Which hysteria binary the app runs (`hysteria_version` command). */
+export interface VersionInfo {
+  version: string;
+  path: string;
 }
 
 /** Session traffic counters pushed via the `traffic-stats` event (bytes / bytes per second). */
